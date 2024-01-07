@@ -34,12 +34,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Optional, Tuple
+from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 from jaxtyping import Float as F
-from torch import arange, random
+from torch import arange, rand
 from torch import Tensor as T
 
 # ## Part 1: State Space Models
@@ -227,31 +227,82 @@ class Mamba(nn.Module):
 
 def main():
     B, N, D, L = 1, 2, 3, 8
-    m = Mamba(N = N, D = D, scanner=Scan())
+    m = Mamba(N = N, D = D, scanner=ParallelScan())
     m.forward(torch.zeros(B, L, D // 2))
 
-main()
+def prepend_zero(x: F[T, '... L A B'], z : F[T, '... 1 A B']) -> F[T, "... L+1 A B"]:
+    return torch.cat((z, x), dim=-3)
+
+def even(x: F[T, "... L A B"]) -> F[T, "... L//2 A B"]:
+    return x[..., 0::2, :, :]
+
+def odd(x: F[T, "... L A B"]) -> F[T, "... L//2 A B"]:
+    return x[..., 1::2, :, :]
+
+def drop_first(x: F[T, "... L A B"]) -> F[T, "... L-1 A B"]:
+    return x[..., 1:, :, :]
+
+def drop_last(x: F[T, "... L A B"]) -> F[T, "... L-1 A B"]:
+    return x[..., :-1, :, :]
+
+def interleave(x: F[T, "... L A B"], y: F[T, "... L A B"]) -> F[T, "... L*2 A B"]:
+    return torch.stack([x, y], dim=-3).view(*x.shape[:-4], -1, *x.shape[-2:]) 
+
+def pscan_matrix(op,
+                 inp: List[F[T, '... L _ _']], 
+                 zer: List[F[T, '... 1 _ _']]
+                 ) -> List[F[T, '... L _ _']]:
+    L = inp[0].shape[-3] 
+    assert L & (L - 1) == 0, f"{L} not power of 2"
+    def pscan(x: List[F[T, '... L _ _']]) -> List[F[T, '... L+1 _ _']]:
+        if x[0].shape[-3] > 1:
+            evens = pscan(op(map(even, x), map(odd, x)))
+            odds = op(map(drop_last, evens), map(even, x))
+            x = map(interleave, odds, map(drop_first, evens))
+        return list(map(prepend_zero, x, zer))
+    return list(map(drop_first, pscan(inp)))
 
 
-def op(d1: tuple[A_, B_], d2: tuple[A_, B_]):
-     A1, b1 = tuple(d1)
-     A2, b2 = tuple(d2)
-     return (A1 * A2, A1 * B_)
+def test_add():
+    def _add(d1, d2):
+        return list(map(lambda a, b: a + b, d1, d2))
+
+    x = arange(16).view(-1, 1, 1).float()
+    y = pscan_matrix(_add, [x], [torch.zeros(1, 1, 1).float()])
+    assert (x.view(-1).cumsum(0) == y[0].view(-1)).all(), (x.cumsum(0), y[0].view(-1)) 
+test_add()
+
+DT = F[T, '... N 1']
+SSMHid = Tuple[DT, DT]
+
+def ssm_merge(d1, d2):
+    A1, b1 = d1
+    A2, b2 = d2
+    return [A1 * A2, A2 * b1 + b2]
 
 
-def pscan(op, inp: List[F[T, "... L #A #B"]]):
-    if inp.shape[] == 1:
-        return inp
-    return pscan(
-        op, op(
-            [i[..., 0::2, :, :] for i in inp],
-            [i[..., 1::2, :, :] for i in inp],
-        ),
-    )
+def init_scan(B: F[T, '... L N 1'], x: F[T, '... L 1 1']) -> F[T, '... L N 1']:
+    return B * x
 
 
-class Scan2:
-    def scan(ssm: SSM_, delta, Delta_, x: X_) -> Y_:
+def test_scan():
+    L = 8
+    N = 2
+    A, B, C = rand(L, N, 1), rand(L, N, 1), rand(L, 1, N)
+    x = rand(L, 1)
+    y1 = ssm_rnn(A, B, C, x)
+    b1 = init_scan(B, x[..., None])
+    h = pscan_matrix(ssm_merge, [A, b1], [torch.zeros(1, N, 1)] * 2)
+    y2 = C @ h[1]
+    assert torch.isclose(y1, y2[..., 0]).all(), f"{y1.squeeze()} {y2.squeeze()}"
+  
+test_scan()
+
+
+class ParallelScan:
+    def scan(ssm: S6, x: F[T, 'B L D']) -> F[T, 'B L D']:
         A, B = discretize_zoh_diag(ssm.A, ssm.B, ssm.d)
-        y = pscan(op, [A, B, ssm.C, x.transpose(1, 2)[..., None])[..., 0]])
+        b1 = init_scan(B, x.transpose(1, 2)[..., None, None])
+        y = pscan(ssm_merge, [A, b1])
         return y.transpose(1, 2)
+#main()
