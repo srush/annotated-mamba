@@ -38,7 +38,7 @@ from typing import Callable, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
-from jaxtyping import Float as F
+from jaxtyping import Float as F, Integer
 from torch import arange, rand
 from torch import Tensor as T
 
@@ -68,17 +68,10 @@ from torch import Tensor as T
 
 def ssm_step(A_bar: F[T, '... N 1'], 
              B_bar: F[T, '... N 1'],
-             C_bar: F[T, '... 1 N'], 
-             h: Optional[F[T, '... N 1']],
-             x: F[T, '... 1 1']
-             ) -> Tuple[F[T, '... N 1'], 
-                        F[T, '... 1']]:
-    if h is None:
-        h = B_bar * x
-    else:
-        h = A_bar * h + B_bar * x
-    y = C_bar @ h
-    return h, y
+             h: F[T, '... N 1'],
+             x: F[T, '...']
+             ) -> F[T, '... N 1']:
+    return A_bar * h + B_bar * x[..., None, None]
 
 
 # Same type
@@ -105,25 +98,22 @@ def discretize_zoh_diag(
     return A_bar, B_bar
 
 
-
-
 def ssm_rnn(A_bar: F[T, '... L N 1'], 
             B_bar: F[T, '... L N 1'],
-            C_bar: F[T, '... L 1 N'], 
-            x: F[T, '... L 1']
-            ) -> F[T, '... L 1']:
-    L = x.shape[-2]
-    ys = []
-    h = None
+            x: F[T, '... L'],
+            h_init: Optional[F[T, '... N 1']] = None
+            ) -> F[T, '... L N 1']:
+    L = x.shape[-1]
+    h = torch.zeros_like(B_bar)
+    if h_init is not None:
+        h[..., -1, :, :] = h_init
     for l in range(L):
-        h, y = ssm_step(A_bar[..., l, :, :], 
-                        B_bar[..., l, :, :], 
-                        C_bar[..., l, :, :], 
-                        h, 
-                        x[..., l, :, None])
-        ys.append(y)
-    print(ys[0].shape)
-    return torch.cat(ys, dim=-2)
+        h[..., l, :, :] = ssm_step(A_bar[..., l, :, :], 
+                            B_bar[..., l, :, :],                         
+                            h[..., l-1, :, :], 
+                            x[..., l])
+        
+    return h
 #
 # $$
 #   \begin{aligned}
@@ -150,9 +140,6 @@ def ssm_rnn(A_bar: F[T, '... L N 1'],
 #   \end{aligned}
 # $$
 
-from beartype import beartype as typechecker
-from jaxtyping import jaxtyped
-
 @dataclass
 class S6:
     A : F[T, '1 D 1 N 1']
@@ -160,13 +147,14 @@ class S6:
     C : F[T, 'B 1 L 1 N']
     d : F[T, 'B D L 1 1']
 
-
 class Scan:
     @staticmethod
-    def scan(ssm: S6, x: F[T, 'B L D']) -> F[T, 'B L D']:
+    def scan(ssm: S6, x: F[T, 'B D L'], h: Optional[F[T, 'B D N 1']]
+             ) -> Tuple[F[T, 'B D L'], F[T, 'B D N 1']]:
         A, B = discretize_zoh_diag(ssm.A, ssm.B, ssm.d)
-        y = ssm_rnn(A, B, ssm.C, x.transpose(1, 2)[..., None])[..., 0]
-        return y.transpose(1, 2)
+        h = ssm_rnn(A, B, x, h_init=h)
+        y = ssm.C @ h
+        return y.squeeze(-1).squeeze(-1), h[..., -1, :, :]
 
 def init_A(D: int, N: int) -> F[T, '1 D 1 N 1']:
     return -(arange(N) + 1).view(1, 1, 1, N, 1).expand(1, D, 1, N, 1).clone().float()
@@ -180,18 +168,22 @@ class SelectiveStructuredSSM(nn.Module):
         self.s_B, self.s_C = nn.Linear(D, N), nn.Linear(D, N)
         self.s_Delta = nn.Linear(D, 1)
         self.p_Delta = nn.Parameter(torch.zeros(D, 1, 1))
-        self.scanner = scanner    
+        self.scanner = scanner
+        self.rnn_state = self.register_buffer('rnn_state', None)
+        self.cache = False
 
-    def forward(self, 
-                x: F[T, 'B L D']
-                ) -> F[T, 'B L D']:
-        assert x.shape[-1] == self.D, f"{x.shape} {self.D}"
-        N = self.N
-        B = self.s_B(x)[:, None, :, :, None]
-        C = self.s_C(x)[:, None, :, None, :]
-        d = nn.functional.softplus(self.s_Delta(x)[:, None, :, :] + self.p_Delta)[..., None]
+    def forward(self, x: F[T, 'B D L']) -> F[T, 'B D L']:
+        assert x.shape[-2] == self.D, f"{x.shape} {self.D}"
+        xT = x.transpose(1, 2)
+        B = self.s_B(xT)[:, None, :, :, None]
+        C = self.s_C(xT)[:, None, :, None, :]
+        d = nn.functional.softplus(self.s_Delta(xT)[:, None, :, :] + self.p_Delta)[..., None]
         ssm = S6(self.A, B, C, d)
-        return self.scanner.scan(ssm, x)
+        y, h_n = self.scanner.scan(ssm, x, h=self.rnn_state if self.cache else None)
+        if self.cache:
+            self.rnn_state = h_n.clone()
+        return y
+
 
 # $$
 #   \begin{aligned}
@@ -204,7 +196,7 @@ class SelectiveStructuredSSM(nn.Module):
 # ## Mamba Architecture
 # ![](images/arch.png)
 
-class Mamba(nn.Module):
+class MambaBlock(nn.Module):
     def __init__(self, N, D, scanner: Scan):
         super().__init__()
         self.s6 = SelectiveStructuredSSM(N=N, D=D, scanner=scanner)
@@ -216,8 +208,8 @@ class Mamba(nn.Module):
 
     def forward(self, x: F[T, 'B L D_2']) -> F[T, 'B L D_2']:
         x1 = self.p_up1(x)
-        x1 = torch.relu(self.conv(x1.transpose(1, 2))).transpose(1, 2)
-        x1 = self.s6(x1)
+        x1 = torch.relu(self.conv(x1.transpose(1, 2)))
+        x1 = self.s6(x1).transpose(1, 2)
         x2 = self.p_up2(x)
         return self.p_down(x1 * torch.relu(x2))
 
@@ -227,8 +219,11 @@ class Mamba(nn.Module):
 
 def main():
     B, N, D, L = 1, 2, 3, 8
-    m = Mamba(N = N, D = D, scanner=ParallelScan())
-    m.forward(torch.zeros(B, L, D // 2))
+    m = MambaBlock(N = N, D = D, scanner=ParallelScan())
+    out = m.forward(torch.ones(B, L, D // 2))
+    m.scanner = Scan()
+    out2 = m.forward(torch.ones(B, L, D // 2))
+    assert torch.isclose(out, out2).all(), f"{out} {out2}"
 
 def prepend_zero(x: F[T, '... L A B'], z : F[T, '... 1 A B']) -> F[T, "... L+1 A B"]:
     return torch.cat((z, x), dim=-3)
@@ -246,7 +241,7 @@ def drop_last(x: F[T, "... L A B"]) -> F[T, "... L-1 A B"]:
     return x[..., :-1, :, :]
 
 def interleave(x: F[T, "... L A B"], y: F[T, "... L A B"]) -> F[T, "... L*2 A B"]:
-    return torch.stack([x, y], dim=-3).view(*x.shape[:-4], -1, *x.shape[-2:]) 
+    return torch.stack([x, y], dim=-3).view(*x.shape[:-3], -1, *x.shape[-2:]) 
 
 def pscan_matrix(op,
                  inp: List[F[T, '... L _ _']], 
@@ -281,28 +276,112 @@ def ssm_merge(d1, d2):
     return [A1 * A2, A2 * b1 + b2]
 
 
-def init_scan(B: F[T, '... L N 1'], x: F[T, '... L 1 1']) -> F[T, '... L N 1']:
-    return B * x
+def init_scan(B: F[T, '... L N 1'], x: F[T, '... L']) -> F[T, '... L N 1']:
+    return B * x[..., None, None]
 
 
 def test_scan():
     L = 8
     N = 2
     A, B, C = rand(L, N, 1), rand(L, N, 1), rand(L, 1, N)
-    x = rand(L, 1)
-    y1 = ssm_rnn(A, B, C, x)
-    b1 = init_scan(B, x[..., None])
-    h = pscan_matrix(ssm_merge, [A, b1], [torch.zeros(1, N, 1)] * 2)
-    y2 = C @ h[1]
-    assert torch.isclose(y1, y2[..., 0]).all(), f"{y1.squeeze()} {y2.squeeze()}"
+    x = rand(L)
+    h = ssm_rnn(A, B, x)
+    y1 = C @ h
+    
+    b1 = init_scan(B, x)
+    _, h = pscan_matrix(ssm_merge, [A, b1], [torch.zeros(*A.shape[:-3], 1, *A.shape[-2:]), 
+                                          torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:])])
+    y2 = C @ h
+    assert torch.isclose(y1, y2).all(), f"{y1.squeeze()} {y2.squeeze()}"
   
 test_scan()
 
 
-class ParallelScan:
-    def scan(ssm: S6, x: F[T, 'B L D']) -> F[T, 'B L D']:
+class ParallelScan(Scan):
+    @staticmethod
+    def scan(ssm: S6, x: F[T, 'B D L'], h: Optional[F[T, 'B D N 1']]
+             ) -> Tuple[F[T, 'B D L'], F[T, 'B D N 1']]:
+        assert h is None
         A, B = discretize_zoh_diag(ssm.A, ssm.B, ssm.d)
-        b1 = init_scan(B, x.transpose(1, 2)[..., None, None])
-        y = pscan(ssm_merge, [A, b1])
-        return y.transpose(1, 2)
-#main()
+        b1 = init_scan(B, x)
+        _, h = pscan_matrix(ssm_merge, [A, b1], [torch.zeros(*A.shape[:-3], 1, *A.shape[-2:]), 
+                                              torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:])])
+        y = ssm.C @ h
+        return y[..., 0, 0], h[..., -1, :, :]
+main()
+
+# Model with multiple stacked mamba blocks that starts with embeddings and produces a softmax output. 
+# Uses module list to store the mamba blocks. 
+# __init__ Takes number of input and output classes, layers, N, D and scanner as args.
+class Mamba(nn.Module):
+    def __init__(self, 
+                 N: int, 
+                 D: int, 
+                 scanner: Scan,
+                 layers: int = 1, 
+                 n_classes: int = 10):
+        super().__init__()
+        self.emb = nn.Embedding(n_classes, D // 2)
+        self.mamba_blocks = nn.ModuleList([MambaBlock(N, D, scanner) for _ in range(layers)])
+        self.predict = nn.Linear(D // 2, n_classes)
+
+    def cache(self, cache: bool = True):
+        for mamba_block in self.mamba_blocks:
+            mamba_block.s6.cache = cache
+            mamba_block.s6.scanner = Scan()
+
+    def forward(self, x: Integer[T, 'B L 1']) -> F[T, 'B L C']:
+        x = self.emb(x).squeeze(-2)
+        for mamba_block in self.mamba_blocks:
+            x = mamba_block(x)
+        x = self.predict(x)
+        return x
+
+    # Code to sample one step from the model as if it were an RNN. Keep a cache. 
+
+from .data import *
+
+trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM = create_sin_x_dataset(bsz=4)
+
+# The code for training and test a sequence model with an adam optimizer. Takes train and test loaders and a model as input.
+
+def train(model: nn.Module, 
+          trainloader: torch.utils.data.DataLoader, 
+          epochs: int = 10, 
+          lr: float = 0.001):
+    criterion = nn.CrossEntropyLoss()
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    for epoch in range(epochs):
+        running_loss = 0.0
+        for i, (x, y) in enumerate(trainloader, 0):
+            optimizer.zero_grad()
+            out = model(x.long())
+            loss = criterion(out[:, :-1].contiguous().view(-1, out.shape[-1]), y[:, 1:].long().contiguous().view(-1))
+            loss.backward()
+            optimizer.step()
+            running_loss += loss.item()
+            if i % 100 == 0:
+                print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 100}")
+                running_loss = 0.0
+
+m = Mamba(16, 32, ParallelScan(), 1, N_CLASSES)
+train(m, trainloader, epochs=4)
+
+
+def generate(model: nn.Module, testloader: torch.utils.data.DataLoader):
+    for i, (x, y) in enumerate(testloader, 0):
+        batch, seq = x.shape[:2]
+        x = x[:, :10, :].long()
+        # Generate 128 outputs starting from x[0]
+        model.cache()
+        model.eval()
+        model(x[:1, :9, :])
+        with torch.no_grad():
+            for _ in range(10):
+                next = model(x[:1, -1:, :])
+                next_word = next.argmax(-1)
+                x = torch.cat((x, next_word[..., None]), dim=-2)
+            print(x)
+
+generate(m, testloader)
+

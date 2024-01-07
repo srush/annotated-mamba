@@ -5,3 +5,5 @@ from jaxtyping import install_import_hook
 # decorate `@jaxtyped(typechecker=beartype.beartype)`
 with install_import_hook("mamba", "beartype.beartype"):
     from .mamba import *
+
+from .data import *
