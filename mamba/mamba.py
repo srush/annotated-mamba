@@ -227,11 +227,16 @@ class MambaBlock(nn.Module):
 def prepend_zero(x: F[T, '... L A B'], z : F[T, '... 1 A B']) -> F[T, "... L+1 A B"]:
     return torch.cat((z, x), dim=-3)
 
-def even(x: F[T, "... L A B"]) -> F[T, "... L//2 A B"]:
+def evens(x: F[T, "... L A B"]) -> F[T, "... L//2 A B"]:
+    return x[..., 1::2, :, :]
+
+
+def odds(x: F[T, "... L A B"]) -> F[T, "... L//2 A B"]:
     return x[..., 0::2, :, :]
 
-def odd(x: F[T, "... L A B"]) -> F[T, "... L//2 A B"]:
-    return x[..., 1::2, :, :]
+def split(x: F[T, "... L A B"]) -> Tuple[F[T, "... L//2 A B"], 
+                                         F[T, "... L//2 A B"]]:
+    return x[..., 0::2, :, :], x[..., 1::2, :, :]
 
 def drop_first(x: F[T, "... L A B"]) -> F[T, "... L-1 A B"]:
     return x[..., 1:, :, :]
@@ -257,10 +262,73 @@ def pscan_matrix(op,
     return list(map(drop_first, pscan(inp)))
 
 
+def pscan_matrix_write(op, inp: List[F[T, '... L _ _']], reverse=False):
+    L = inp[0].shape[-3] 
+    assert L & (L - 1) == 0, f"{L} not power of 2"
+    def _op(d1, d2, write=False):
+        out = op(d1, d2)
+        if write:
+            for d1i, d2i in zip(d1, d2): 
+                d1i.copy_(d2i)
+        for d2i, o in zip(d2, out):
+            d2i.copy_(o)
+
+    def pscan(x: List[F[T, '... L _ _']]):
+        if x[0].shape[-3] > 1:
+            a, b = list(map(odds, x)), list(map(evens, x))
+            if reverse:
+                a, b = b, a
+            _op(a, b)
+            pscan(b)
+            _op(a, b, write=True)
+        else:
+            list(map(lambda x: x.zero_(), x))
+    pscan(inp) 
+
+def make_scan(op, start, end):
+    class ParallelScan(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x, arg1, arg2):
+            ctx.save_for_backward(x, arg1, arg2)
+            inp = list(map(lambda x: x.clone(), start(x, arg1)))
+            pscan_matrix_write(op, inp)
+            return end(inp, arg2)
+
+        @staticmethod
+        def backward(ctx, grad_output):
+            x, arg1, arg2 = ctx.saved_tensors
+            inp, r1 = torch.func.vjp(start, x, arg1)
+            inp = list(map(lambda x: x.clone(), inp))
+            pscan_matrix_write(op, inp)
+            _, r2 = torch.func.vjp(end, inp, arg2)
+
+            grad_mid, garg2 = r2(grad_output)
+            rev = list(map(lambda x: x.clone(), grad_mid))
+            pscan_matrix_write(op, rev, reverse=True)
+            gx, garg1 = r1(rev)
+            return gx, garg1, garg2
+        
+    return ParallelScan
+
+def test_add2():
+    def _add(d1, d2):
+        return [d1[0] + d2[0]]
+    x = arange(16).float().clone()
+    x.requires_grad_(True)
+    x.view(-1).cumsum(0).sum().backward()
+    print(x.grad)
+    x.grad.zero_()
+    scan = make_scan(_add, lambda x, _: [x], lambda x, _: x[0]) 
+    y = scan.apply(x.view(-1, 1, 1), torch.tensor([]), torch.tensor([]))
+    y.sum().backward()
+    print(x.grad)
+    assert (x.view(-1).cumsum(0) == y.view(-1)).all(), (x.view(-1).cumsum(0), y.view(-1)) 
+test_add2()
+
+
 def test_add():
     def _add(d1, d2):
         return list(map(lambda a, b: a + b, d1, d2))
-
     x = arange(16).view(-1, 1, 1).float()
     y = pscan_matrix(_add, [x], [torch.zeros(1, 1, 1).float()])
     assert (x.view(-1).cumsum(0) == y[0].view(-1)).all(), (x.cumsum(0), y[0].view(-1)) 

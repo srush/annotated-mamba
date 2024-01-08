@@ -1,4 +1,3 @@
-print("hello")
 from jaxtyping import install_import_hook
 # Plus any one of the following:
 
