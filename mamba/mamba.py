@@ -222,13 +222,7 @@ class MambaBlock(nn.Module):
 
 # Mamba choices
 
-def main():
-    B, N, D, L = 1, 2, 3, 8
-    m = MambaBlock(N = N, D = D, scanner=ParallelScan())
-    out = m.forward(torch.ones(B, L, D // 2))
-    m.scanner = Scan()
-    out2 = m.forward(torch.ones(B, L, D // 2))
-    assert torch.isclose(out, out2).all(), f"{out} {out2}"
+
 
 def prepend_zero(x: F[T, '... L A B'], z : F[T, '... 1 A B']) -> F[T, "... L+1 A B"]:
     return torch.cat((z, x), dim=-3)
@@ -306,30 +300,43 @@ class ParallelScan(Scan):
     def scan(ssm: S6, x: F[T, 'B D L'], h: Optional[F[T, 'B D N 1']]
              ) -> Tuple[F[T, 'B D L'], F[T, 'B D N 1']]:
         assert h is None
+        
         A, B = discretize_zoh_diag(ssm.A, ssm.B, ssm.d)
         b1 = init_scan(B, x)
-        print(A.shape, b1.shape)
         _, h = pscan_matrix(ssm_merge, [A, b1], [torch.zeros(*A.shape[:-3], 1, *A.shape[-2:], device=A.device), 
-                                                 torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:], device=A.device)])
+                                                 torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:], device=b1.device)])
         y = ssm.C @ h
         return y[..., 0, 0], h[..., -1, :, :]
 
+def ssm_merge2(A):
+    def inner(d1, d2):
+        delta1, b1 = d1
+        delta2, b2 = d2
+        return [delta1 + delta2, torch.exp(A * delta2) * b1 + b2]
+    return inner
 
-# class ParallelScan(Scan):
-#     @staticmethod
-#     def scan(ssm: S6, x: F[T, 'B D L'], h: Optional[F[T, 'B D N 1']]
-#              ) -> Tuple[F[T, 'B D L'], F[T, 'B D N 1']]:
-#         assert h is None
+class ParallelScan2(Scan):
+    @staticmethod
+    def scan(ssm: S6, x: F[T, 'B D L'], h: Optional[F[T, 'B D N 1']]
+             ) -> Tuple[F[T, 'B D L'], F[T, 'B D N 1']]:
+        assert h is None
+        d = ssm.d
+        _, B = discretize_zoh_diag(ssm.A, ssm.B, ssm.d)
+        b1 = init_scan(B, x)
+        _, h = pscan_matrix(ssm_merge2(ssm.A), [ssm.d, b1], [torch.zeros(*d.shape[:-3], 1, *d.shape[-2:], device=d.device), 
+                                                             torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:], device=b1.device)])
+        y = ssm.C @ h
+        return y[..., 0, 0], h[..., -1, :, :]
 
-#         b1 = init_scan(B, x)
-#         print(A.shape, b1.shape)
-#         _, h = pscan_matrix(ssm_merge, [ssm.A, ssm.B, ssm.C, ssm.d, x], 
-#                             [torch.zeros(*A.shape[:-3], 1, *A.shape[-2:], device=A.device), 
-#                             torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:], device=A.device)])
-#         y = ssm.C @ h
-#         return y[..., 0, 0], h[..., -1, :, :]
-
-main()
+def test_full():
+    B, N, D, L = 1, 2, 3, 8
+    m = MambaBlock(N = N, D = D, scanner=ParallelScan2())
+    out = m.forward(torch.ones(B, L, D // 2))
+    m.scanner = Scan()
+    out2 = m.forward(torch.ones(B, L, D // 2))
+    print("test_full")
+    assert torch.isclose(out, out2).all(), f"{out} {out2}"
+test_full()
 
 # Model with multiple stacked mamba blocks that starts with embeddings and produces a softmax output. 
 # Uses module list to store the mamba blocks. 
@@ -382,11 +389,11 @@ def train(model: nn.Module,
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
-            if i % 100 == 0:
+            if i % 100 == 20:
                 print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 100} time: {time() - start}")
                 start = time()
                 running_loss = 0.0
-
+                return
 def generate(model: nn.Module, testloader: torch.utils.data.DataLoader):
     for i, (x, y) in enumerate(testloader, 0):
         batch, seq = x.shape[:2]
@@ -404,8 +411,12 @@ def generate(model: nn.Module, testloader: torch.utils.data.DataLoader):
 
 #trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM = create_sin_x_dataset(bsz=16)
 trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM = create_mnist_dataset(bsz=16)
-m = Mamba(16, 128, ParallelScan(), 5, N_CLASSES)
+m = Mamba(16, 128, ParallelScan2(), 5, N_CLASSES)
 m.cuda()
-train(m, trainloader, epochs=3)
-generate(m, testloader)
+from torch.profiler import profile, record_function, ProfilerActivity
+with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA], record_shapes=True) as prof:
+    with record_function("model_inference"):
+        train(m, trainloader, epochs=1)
+print(prof.key_averages(group_by_input_shape=True).table(sort_by="cuda_time_total", row_limit=10))
+#generate(m, testloader)
 
