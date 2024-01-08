@@ -266,14 +266,17 @@ def pscan_matrix_write(op, inp: List[F[T, '... L _ _']], reverse=False):
     L = inp[0].shape[-3] 
     assert L & (L - 1) == 0, f"{L} not power of 2"
     def _op(d1, d2, write=False):
-        out = op(d1, d2)
         if write:
+            out = op(d2, d1)
             for d1i, d2i in zip(d1, d2): 
                 d1i.copy_(d2i)
+        else:
+            out = op(d1, d2)
         for d2i, o in zip(d2, out):
             d2i.copy_(o)
-
+    final = None
     def pscan(x: List[F[T, '... L _ _']]):
+        nonlocal final
         if x[0].shape[-3] > 1:
             a, b = list(map(odds, x)), list(map(evens, x))
             if reverse:
@@ -282,10 +285,19 @@ def pscan_matrix_write(op, inp: List[F[T, '... L _ _']], reverse=False):
             pscan(b)
             _op(a, b, write=True)
         else:
+            final = list(map(lambda x: x.clone(), x))
             list(map(lambda x: x.zero_(), x))
-    pscan(inp) 
 
-def make_scan(op, start, end):
+    pscan(inp)
+    for di, f in zip(inp, final):
+        if reverse:
+            di[..., 1:, :, :] = di[..., :-1, :, :].clone()
+            di[..., 0, :, :] = f
+        else:
+            di[..., :-1, :, :] = di[..., 1:, :, :].clone()
+            di[..., -1, :, :] = f
+
+def make_scan(op, gop, start, end):
     class ParallelScan(torch.autograd.Function):
         @staticmethod
         def forward(ctx, x, arg1, arg2):
@@ -301,14 +313,34 @@ def make_scan(op, start, end):
             inp = list(map(lambda x: x.clone(), inp))
             pscan_matrix_write(op, inp)
             _, r2 = torch.func.vjp(end, inp, arg2)
-
+            print(grad_output)
             grad_mid, garg2 = r2(grad_output)
             rev = list(map(lambda x: x.clone(), grad_mid))
-            pscan_matrix_write(op, rev, reverse=True)
+            print(rev)
+            pscan_matrix_write(gop, rev, reverse=True)
             gx, garg1 = r1(rev)
             return gx, garg1, garg2
-        
     return ParallelScan
+
+def test_prod():
+    def _add10(d1, d2):
+        return [d1[0] * d2[0], d2[0] * d1[1] + d2[1]]
+    def _add10d(d1, d2):
+        return [d1[0] * d2[0], d1[0] * d2[1] + d1[1]]
+    x = arange(1, 5).float().clone()
+    x.requires_grad_(True)
+    p = (1000 * x[0]  + 100 * x[1] + 10 * x[2] + x[3])
+    p.backward()
+    x1g = x.grad.clone()
+    x.grad.zero_()
+    scan = make_scan(_add10, _add10d,
+                     lambda x, _: [torch.tensor([10.0] * 4).view(4,1,1), x], 
+                     lambda x, _: x[1]) 
+    y = scan.apply(x.view(-1, 1, 1), torch.tensor([]), torch.tensor([]))
+    y.sum().backward()
+    assert (x.grad == x1g).all(), f"{x.grad} {x1g}"
+
+test_prod()
 
 def test_add2():
     def _add(d1, d2):
@@ -316,13 +348,15 @@ def test_add2():
     x = arange(16).float().clone()
     x.requires_grad_(True)
     x.view(-1).cumsum(0).sum().backward()
-    print(x.grad)
+    x1g = x.grad.clone()
     x.grad.zero_()
     scan = make_scan(_add, lambda x, _: [x], lambda x, _: x[0]) 
     y = scan.apply(x.view(-1, 1, 1), torch.tensor([]), torch.tensor([]))
     y.sum().backward()
     print(x.grad)
+    assert (x.grad == x1g).all()
     assert (x.view(-1).cumsum(0) == y.view(-1)).all(), (x.view(-1).cumsum(0), y.view(-1)) 
+
 test_add2()
 
 
