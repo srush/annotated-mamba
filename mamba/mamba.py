@@ -34,6 +34,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Callable, List, Optional, Tuple
 
 import torch
@@ -41,6 +42,8 @@ import torch.nn as nn
 from jaxtyping import Float as F, Integer
 from torch import arange, rand
 from torch import Tensor as T
+from .data import *
+from time import time
 
 # ## Part 1: State Space Models
 
@@ -109,9 +112,9 @@ def ssm_rnn(A_bar: F[T, '... L N 1'],
         h[..., -1, :, :] = h_init
     for l in range(L):
         h[..., l, :, :] = ssm_step(A_bar[..., l, :, :], 
-                            B_bar[..., l, :, :],                         
-                            h[..., l-1, :, :], 
-                            x[..., l])
+                                   B_bar[..., l, :, :],                         
+                                   h[..., l-1, :, :], 
+                                   x[..., l])
         
     return h
 #
@@ -204,14 +207,16 @@ class MambaBlock(nn.Module):
         self.p_up1 = nn.Linear(D_2, D)
         self.p_up2 = nn.Linear(D_2, D)
         self.p_down = nn.Linear(D, D_2)
-        self.conv = nn.Conv1d(D, D, 5, padding=2)
+        # conv with left padding
+        self.conv = nn.Conv1d(D, D, kernel_size=3, padding=0)
 
     def forward(self, x: F[T, 'B L D_2']) -> F[T, 'B L D_2']:
         x1 = self.p_up1(x)
-        x1 = torch.relu(self.conv(x1.transpose(1, 2)))
+        x1 = nn.functional.silu(self.conv(nn.functional.pad(x1.transpose(1, 2), (2, 0))))
+        #x1 = x1.transpose(1, 2)
         x1 = self.s6(x1).transpose(1, 2)
         x2 = self.p_up2(x)
-        return self.p_down(x1 * torch.relu(x2))
+        return self.p_down(x1 * nn.functional.silu(x2))
 
 # ## Efficient Implementation
 
@@ -279,7 +284,6 @@ def ssm_merge(d1, d2):
 def init_scan(B: F[T, '... L N 1'], x: F[T, '... L']) -> F[T, '... L N 1']:
     return B * x[..., None, None]
 
-
 def test_scan():
     L = 8
     N = 2
@@ -290,7 +294,7 @@ def test_scan():
     
     b1 = init_scan(B, x)
     _, h = pscan_matrix(ssm_merge, [A, b1], [torch.zeros(*A.shape[:-3], 1, *A.shape[-2:]), 
-                                          torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:])])
+                                             torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:])])
     y2 = C @ h
     assert torch.isclose(y1, y2).all(), f"{y1.squeeze()} {y2.squeeze()}"
   
@@ -304,10 +308,27 @@ class ParallelScan(Scan):
         assert h is None
         A, B = discretize_zoh_diag(ssm.A, ssm.B, ssm.d)
         b1 = init_scan(B, x)
-        _, h = pscan_matrix(ssm_merge, [A, b1], [torch.zeros(*A.shape[:-3], 1, *A.shape[-2:]), 
-                                              torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:])])
+        print(A.shape, b1.shape)
+        _, h = pscan_matrix(ssm_merge, [A, b1], [torch.zeros(*A.shape[:-3], 1, *A.shape[-2:], device=A.device), 
+                                                 torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:], device=A.device)])
         y = ssm.C @ h
         return y[..., 0, 0], h[..., -1, :, :]
+
+
+# class ParallelScan(Scan):
+#     @staticmethod
+#     def scan(ssm: S6, x: F[T, 'B D L'], h: Optional[F[T, 'B D N 1']]
+#              ) -> Tuple[F[T, 'B D L'], F[T, 'B D N 1']]:
+#         assert h is None
+
+#         b1 = init_scan(B, x)
+#         print(A.shape, b1.shape)
+#         _, h = pscan_matrix(ssm_merge, [ssm.A, ssm.B, ssm.C, ssm.d, x], 
+#                             [torch.zeros(*A.shape[:-3], 1, *A.shape[-2:], device=A.device), 
+#                             torch.zeros(*b1.shape[:-3], 1, *b1.shape[-2:], device=A.device)])
+#         y = ssm.C @ h
+#         return y[..., 0, 0], h[..., -1, :, :]
+
 main()
 
 # Model with multiple stacked mamba blocks that starts with embeddings and produces a softmax output. 
@@ -339,9 +360,6 @@ class Mamba(nn.Module):
 
     # Code to sample one step from the model as if it were an RNN. Keep a cache. 
 
-from .data import *
-
-trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM = create_sin_x_dataset(bsz=4)
 
 # The code for training and test a sequence model with an adam optimizer. Takes train and test loaders and a model as input.
 
@@ -349,33 +367,34 @@ def train(model: nn.Module,
           trainloader: torch.utils.data.DataLoader, 
           epochs: int = 10, 
           lr: float = 0.001):
-    criterion = nn.CrossEntropyLoss()
+    criterion = nn.CrossEntropyLoss(ignore_index=-100)
     optimizer = torch.optim.Adam(model.parameters(), lr=lr)
     for epoch in range(epochs):
         running_loss = 0.0
-        for i, (x, y) in enumerate(trainloader, 0):
+        start = time()
+        for i, (x, _) in enumerate(trainloader, 0):
             optimizer.zero_grad()
-            out = model(x.long())
-            loss = criterion(out[:, :-1].contiguous().view(-1, out.shape[-1]), y[:, 1:].long().contiguous().view(-1))
+            L = x.shape[1]
+            goal = 2 ** math.ceil(math.log2(L))
+            out = model(torch.cat([x.long(), torch.zeros(x.shape[0], goal-L, 1)], 1).long().cuda())
+            loss = criterion(out[:, :-1].contiguous().view(-1, out.shape[-1]), 
+                             torch.cat([x[:, 1:, 0], torch.zeros(x.shape[0], goal-L) - 100], 1).long().view(-1).cuda())
             loss.backward()
             optimizer.step()
             running_loss += loss.item()
             if i % 100 == 0:
-                print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 100}")
+                print(f"[{epoch + 1}, {i + 1}] loss: {running_loss / 100} time: {time() - start}")
+                start = time()
                 running_loss = 0.0
-
-m = Mamba(16, 32, ParallelScan(), 1, N_CLASSES)
-train(m, trainloader, epochs=4)
-
 
 def generate(model: nn.Module, testloader: torch.utils.data.DataLoader):
     for i, (x, y) in enumerate(testloader, 0):
         batch, seq = x.shape[:2]
-        x = x[:, :10, :].long()
+        x = x[:, :2, :].long().cuda()
         # Generate 128 outputs starting from x[0]
         model.cache()
         model.eval()
-        model(x[:1, :9, :])
+        model(x[:1, :1, :])
         with torch.no_grad():
             for _ in range(10):
                 next = model(x[:1, -1:, :])
@@ -383,5 +402,10 @@ def generate(model: nn.Module, testloader: torch.utils.data.DataLoader):
                 x = torch.cat((x, next_word[..., None]), dim=-2)
             print(x)
 
+#trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM = create_sin_x_dataset(bsz=16)
+trainloader, testloader, N_CLASSES, SEQ_LENGTH, IN_DIM = create_mnist_dataset(bsz=16)
+m = Mamba(16, 128, ParallelScan(), 5, N_CLASSES)
+m.cuda()
+train(m, trainloader, epochs=3)
 generate(m, testloader)
 
