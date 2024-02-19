@@ -15,19 +15,36 @@ help:
 	@echo "make clean"
 	@echo "    Delete the generated, top-level s4.ipynb notebook."
 
+check:
+	isort --check s4/s4.py s4/data.py s4/train.py s4/sample.py
+	black --check s4/s4.py s4/data.py s4/train.py s4/sample.py
+	flake8 --show-source s4/s4.py s4/data.py s4/train.py s4/sample.py
 
-notebook: mamba.py
-	jupytext --to notebook mamba.py -o mamba.ipynb
+autoformat:
+	isort --atomic s4/s4.py s4/data.py s4/train.py s4/sample.py
+	black s4/s4.py s4/data.py s4/train.py s4/sample.py
+	flake8 --show-source s4/s4.py s4/data.py s4/train.py s4/sample.py
+
+notebook: s4/s4.py s4/dss.py s4/s4d.py
+	jupytext --to notebook s4/s4.py -o s4.ipynb
+	jupytext --to notebook s4/dss.py -o dss.ipynb
+	jupytext --to notebook s4/s4d.py -o s4d.ipynb
 
 html: mamba.py
-	jupytext --to notebook mamba.py -o mamba.ipynb
-	jupyter nbconvert --to html mamba.ipynb
+	jupytext --to notebook s4/s4.py -o s4.ipynb
+	jupyter nbconvert --to html s4.ipynb
+	jupytext --to notebook s4/dss.py -o dss.ipynb
+	jupyter nbconvert --to html dss.ipynb
+	jupytext --to notebook s4/s4d.py -o s4d.ipynb
+	jupyter nbconvert --to html s4d.ipynb
 
-md: mamba.py
-	jupytext --to markdown mamba.py
+md: Scan.ipynb
+	jupytext --to markdown Scan.ipynb
 
-blog: md
-	pandoc docs/header-includes.yaml mamba.md  --katex=/usr/local/lib/node_modules/katex/dist/ --output=docs/index.html --to=html5 --css=docs/github.min.css --css=docs/tufte.css --no-highlight --self-contained --metadata pagetitle="The Annotated Mamba"
-
-clean: mamba.ipynb
-	rm -f mamba.ipynb
+blog: Scan.md
+	pandoc docs/header-includes.yaml Scan.md  --katex=/usr/share/javascript/katex/ --output=docs/index.html --to=html5 --css=docs/github.min.css --css=docs/tufte.css --css=docs/extra.css --no-highlight --self-contained --metadata pagetitle="Mamba: The Hard Way"
+	
+clean: s4.ipynb dss.ipynb s4d.ipynb
+	rm -f s4.ipynb
+	rm -f dss.ipynb
+	rm -f s4d.ipynb
