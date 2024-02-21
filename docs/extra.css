@@ -12,3 +12,8 @@ display: none;
 h1 {
   text-align: center;
 }
+
+pre code.hljs {
+font-size: small;
+
+}
