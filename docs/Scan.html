@@ -7626,7 +7626,7 @@ a.anchor-link {
 </div>
 <div class="jp-InputArea jp-Cell-inputArea"><div class="jp-InputPrompt jp-InputArea-prompt">
 </div><div class="jp-RenderedHTMLCommon jp-RenderedMarkdown jp-MarkdownOutput" data-mime-type="text/markdown">
-<p>Triton is a small language. It mostly allows you to read tensors from globabl GPU memory, manipulate them with basic tensor operations, and then write them out again. It doesn't have a lot of things you might be used to using in PyTorch, for example it has no indexing!</p>
+<p>Triton is a small language. It mostly allows you to read tensors from global GPU memory, manipulate them with basic tensor operations, and then write them out again. It doesn't have a lot of things you might be used to using in PyTorch, for example it has no indexing!</p>
 </div>
 </div>
 </div>
@@ -7660,7 +7660,7 @@ a.anchor-link {
     <span class="n">y</span> <span class="o">=</span> <span class="n">tl</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">Y</span> <span class="o">+</span> <span class="n">Ls</span><span class="o">*</span><span class="n">K</span> <span class="o">+</span> <span class="n">Ks</span><span class="p">)</span> <span class="c1"># L x K</span>
     <span class="n">z</span> <span class="o">=</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span> <span class="c1"># L x K</span>
 
-    <span class="c1"># Storye</span>
+    <span class="c1"># Store</span>
     <span class="n">tl</span><span class="o">.</span><span class="n">store</span><span class="p">(</span><span class="n">Z</span> <span class="o">+</span> <span class="n">Ls</span><span class="o">*</span><span class="n">K</span> <span class="o">+</span> <span class="n">Ks</span><span class="p">,</span> <span class="n">z</span><span class="p">)</span> <span class="c1"># L x K</span>
 
 <span class="n">x</span><span class="p">,</span> <span class="n">y</span> <span class="o">=</span> <span class="n">arange</span><span class="p">(</span><span class="mi">4</span><span class="p">),</span><span class="n">ones</span><span class="p">(</span><span class="mi">8</span><span class="p">,</span> <span class="mi">4</span><span class="p">)</span>
@@ -7739,7 +7739,7 @@ a.anchor-link {
     <span class="n">y</span> <span class="o">=</span> <span class="n">tl</span><span class="o">.</span><span class="n">load</span><span class="p">(</span><span class="n">Y</span> <span class="o">+</span> <span class="p">(</span><span class="n">Ls</span> <span class="o">+</span> <span class="n">lid</span><span class="p">)</span> <span class="o">*</span><span class="n">K</span> <span class="o">+</span> <span class="n">Ks</span><span class="p">)</span> <span class="c1"># L x K</span>
     <span class="n">z</span> <span class="o">=</span> <span class="n">x</span> <span class="o">+</span> <span class="n">y</span> <span class="c1"># L x K</span>
 
-    <span class="c1"># Storye</span>
+    <span class="c1"># Store</span>
     <span class="n">tl</span><span class="o">.</span><span class="n">store</span><span class="p">(</span><span class="n">Z</span> <span class="o">+</span> <span class="p">(</span><span class="n">Ls</span> <span class="o">+</span> <span class="n">lid</span><span class="p">)</span> <span class="o">*</span> <span class="n">K</span> <span class="o">+</span> <span class="n">Ks</span><span class="p">,</span> <span class="n">z</span><span class="p">)</span> <span class="c1"># L x K</span>
 
 <span class="n">L</span> <span class="o">=</span> <span class="mi">2</span><span class="o">**</span><span class="mi">15</span>
@@ -7968,7 +7968,7 @@ $$y_k = h_{k}$$</p>
 <p>Note though that internally it doesn't calculate things left to right, but instead builds up a tree.</p>
 <p>Since sum is associative,
 $$(x_1 + x_2) + x_3 = x_1 + (x_2 + x_3)$$</p>
-<p>We can use Triton's <code>associative_scan</code> function. It compute this tree in parallel to sum up all the numbers.</p>
+<p>We can use Triton's <code>associative_scan</code> function. It computes this tree in parallel to sum up all the numbers.</p>
 </div>
 </div>
 </div>
