@@ -1,6 +1,7 @@
-torch==2.1
+torch=2.0.1
 matplotlib
 jaxtyping
 beartype
 datasets
 torchvision
+triton==2.2.0
