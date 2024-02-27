@@ -1,8 +1,8 @@
-Part 1: 
+# Blog Post
+[Blog](https://srush.github.io/annotated-mamba/hard.html) [Notebook](https://github.com/srush/annotated-mamba/blob/main/Scan.ipynb) [Colab](https://colab.research.google.com/github/srush/annotated-mamba/blob/main/Scan.ipynb)
 
-Blog: https://srush.github.io/annotated-mamba/hard.html
+![image](https://github.com/srush/annotated-mamba/assets/35882/d21e62eb-cc3b-4fa2-9e7e-88bbf8d08325)
 
-Notebook: https://github.com/srush/annotated-mamba/blob/main/Scan.ipynb
 
 
 Mamba: Linear-Time Sequence Modeling with Selective State Spaces
