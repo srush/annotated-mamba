@@ -19,13 +19,6 @@ def check(*inputs, prec=1e-4):
     print("match")
 
 @triton.jit
-def discretize_tt(a, b, delta):
-    da = delta * a
-    a_ = tl.exp(da)
-    b_ = b * (a_ - 1) / da
-    return a_, b_
-
-@triton.jit
 def simple_ssm_tt(X, A, B, C, Y, K: tl.constexpr):
     Ks = tl.arange(0, K)
 
