@@ -223,7 +223,7 @@ def create(S = 128, Ba = 2, D = 4, N = 4, K=16):
     extra = (dx, da, db, dc, ddelta, y, dy, h, dh)
     return x, a, b, c, delta, extra
 
-def mamba(x, a, b, c, delta, extra, K=16, D_step=2):
+def mamba(x, a, b, c, delta, extra, K=16, D_step=2, back=1):
     #s = time.time()
     Ba = x.shape[0]
     N = a.shape[1]
@@ -234,10 +234,11 @@ def mamba(x, a, b, c, delta, extra, K=16, D_step=2):
     assert BLOCKS == SEQLEN // K
     assert SEQLEN % BLOCKS == 0
     assert D % D_step == 0
-    mamba_for_tt[(BLOCKS, Ba)](x, dx, a, da, b, db, c, dc, delta, ddelta, h[0], dh[0], y, dy, h[0], dh[0], back=1, step=1, L=SEQLEN, K=K, D_step=D_step, D=D, N=N)
+    mamba_for_tt[(BLOCKS, Ba)](x, dx, a, da, b, db, c, dc, delta, ddelta, h[0], dh[0], y, dy, h[0], dh[0], back=back, step=1, L=SEQLEN, K=K, D_step=D_step, D=D, N=N)
     reduce(h, False, Ba * N * D)
-    reduce(dh, True, Ba * N * D)
-    mamba_for_tt[(BLOCKS, Ba)](x, dx, a, da, b, db, c, dc, delta, ddelta, h[1], dh[1], y, dy, h[1], dh[1], back=1, step=2, L=SEQLEN, K=K, D_step=D_step, D=D, N=N)
+    if back:
+        reduce(dh, True, Ba * N * D)
+    mamba_for_tt[(BLOCKS, Ba)](x, dx, a, da, b, db, c, dc, delta, ddelta, h[1], dh[1], y, dy, h[1], dh[1], back=back, step=2, L=SEQLEN, K=K, D_step=D_step, D=D, N=N)
     return y, dx, da.sum(-1, keepdim=True), db, dc, ddelta
 
 
@@ -252,7 +253,7 @@ check(y, y_, dx, x.grad, dc, c.grad,  db, b.grad, da, a.grad, prec=1e-3)
 
 
 import selective_scan_cuda
-x, a, b, c, delta, extra = create(S = 8192, Ba = 8, D = 256, N=4, K=32)
+x, a, b, c, delta, extra = create(S = 1024, Ba = 8, D = 256, N=4, K=32)
 mamba(x, a, b, c, delta, extra, K = 128, D_step=16)[0]
 
 s = time.time()
@@ -260,8 +261,10 @@ for i in range(50):
     mamba(x, a, b, c, delta, extra, K = 128, D_step=16)[0]
 print("TRITON:", time.time() - s)
 
-
+(dx, da, db, dc, ddelta, y, dy, h, dh) = extra
 s = time.time()
 for i in range(50):
-    y_them = selective_scan_cuda.fwd(x.squeeze(1), delta.squeeze(1), a[0].squeeze(-1).T, b.squeeze(-2)[:, None, :, :], c.squeeze(-2)[:, None, :, :], None, None, None, False)
+    # For forward...
+    #y_them = selective_scan_cuda.fwd(x.squeeze(1), delta.squeeze(1), a[0].squeeze(-1).T, b.squeeze(-2)[:, None, :, :], c.squeeze(-2)[:, None, :, :], None, None, None, False)
+    selective_scan_cuda.bwd(x.squeeze(1), delta.squeeze(1), a[0].squeeze(-1).T, b.squeeze(-2)[:, None, :, :], c.squeeze(-2)[:, None, :, :], None, None, None, dy.squeeze(1), None, None, None, False, False)
 print("MAMBA:", time.time() - s)
