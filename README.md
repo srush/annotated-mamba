@@ -13,3 +13,7 @@ https://arxiv.org/abs/2312.00752
 
 The triton version is still a lot slower than the mamba custom kernel. If anyone has ideas for speeding it up, I would love to hear them. The file `final.py` has a minimal version with benchmarking. 
 
+```python
+pip install mamba-ssm
+pip install -U http://kermit.bounceme.net:8900/triton-3.0.0-cp310-cp310-linux_x86_64.whl
+```
